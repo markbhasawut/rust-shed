@@ -116,8 +116,9 @@ impl Transaction {
                 Ok(tr.commit().await?)
             }
             Transaction::OssMysql(ref mut tr) => {
-                let tr = tr.take().expect("Called rollback after drop");
-                Ok(tr.commit().await?)
+                let tr = tr.take().expect("Called commit after drop");
+                let endpoint = mysql::oss_tx_endpoint(&tr);
+                Ok(mysql::oss_tx_guard(mysql::OssPhase::Commit, endpoint, tr.commit()).await?)
             }
         }
     }
@@ -133,7 +134,14 @@ impl Transaction {
             }
             Transaction::OssMysql(ref mut tr) => {
                 let tr = tr.take().expect("Called rollback after drop");
-                Ok(tr.rollback().await?)
+                // A ROLLBACK that times out commits nothing either: its
+                // connection is discarded, and the server rolls back when it
+                // closes.
+                let endpoint = mysql::oss_tx_endpoint(&tr);
+                Ok(
+                    mysql::oss_tx_guard(mysql::OssPhase::InTransaction, endpoint, tr.rollback())
+                        .await?,
+                )
             }
         }
     }
