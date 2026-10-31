@@ -12,8 +12,11 @@
 
 #[cfg(shed_sql_mysql)]
 mod facebook;
+#[cfg(test)]
+mod fake_mysqld;
 #[cfg(not(shed_sql_mysql))]
 mod mysql_stub;
+mod oss_pool;
 mod ossmysql_wrapper;
 #[cfg(shed_sql_mysql)]
 pub use facebook::Connection;
@@ -36,6 +39,19 @@ pub use mysql_stub::Connection;
 pub use mysql_stub::MysqlError;
 #[cfg(not(shed_sql_mysql))]
 pub use mysql_stub::Transaction;
+pub use oss_pool::OssErrorHook;
+pub use oss_pool::OssErrorKind;
+pub use oss_pool::OssMysqlError;
+pub use oss_pool::OssPhase;
+pub use oss_pool::OssPool;
+pub use oss_pool::OssPoolBuilder;
+pub use oss_pool::OssPoolState;
+pub use oss_pool::OssStmt;
+pub use oss_pool::OssWaitHook;
+pub use oss_pool::oss_transaction_statement_timeout;
+pub use oss_pool::oss_tx_endpoint;
+pub use oss_pool::oss_tx_guard;
+pub use oss_pool::set_oss_transaction_statement_timeout;
 pub use ossmysql_wrapper::OssConnection;
 pub use ossmysql_wrapper::OssQueryTelemetry;
 use stats::prelude::*;
@@ -164,6 +180,14 @@ pub use mysql_query;
 pub enum IsolationLevel {
     /// Each consistent read, even within the same transaction, sets and reads its own fresh snapshot.
     ReadCommitted,
+}
+
+impl From<IsolationLevel> for mysql_async::IsolationLevel {
+    fn from(isolation_level: IsolationLevel) -> Self {
+        match isolation_level {
+            IsolationLevel::ReadCommitted => mysql_async::IsolationLevel::ReadCommitted,
+        }
+    }
 }
 
 /// Result returned by a write query

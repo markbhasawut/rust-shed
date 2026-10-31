@@ -82,6 +82,7 @@ pub use sql_common::SqlShardedConnections;
 pub use sql_common::WriteResult;
 pub use sql_common::mysql;
 pub use sql_common::mysql::OssConnection;
+pub use sql_common::mysql::OssPool;
 pub use sql_common::sqlite;
 pub use sql_common::transaction::Transaction;
 
@@ -420,7 +421,6 @@ macro_rules! _query_common {
         use $crate::rusqlite::Statement as SqliteStatement;
         use $crate::rusqlite::types::ToSql as ToSqliteValue;
         use $crate::sql_common::QueryTelemetry;
-        use $crate::sql_common::mysql::OssConnection;
         use $crate::sql_common::sqlite;
         use $crate::sqlite::SqliteConnectionGuard;
         use $crate::sqlite::SqliteMultithreaded;
@@ -471,15 +471,7 @@ macro_rules! _read_query_impl {
                 }
                 Connection::OssMysql(conn) => {
                     let query = mysql_query($( $pname, )* $( $lname, )*);
-
-                    let mut con = OssConnection::get_conn_counted(conn.pool.clone(), &conn.stats).await?;
-                    let (mut res, _tel) = conn.read_query(&mut con, &query).map_err(Error::from).await?;
-
-                    let result = res
-                        .map( |row| mysql_async_row_to_tuple(row))
-                        .await?
-                        .into_iter()
-                        .collect::<Result<Vec<($( $rtype, )*)>, Error>>()?;
+                    let result = conn.read_rows(&query, mysql_async_row_to_tuple).await?;
 
                     // OssMysql doesn't support query telemetry
                     Ok((result, None))
@@ -540,14 +532,18 @@ macro_rules! _read_query_impl {
                     let query = mysql_query($( $pname, )* $( $lname, )*);
 
                     let mut tr = transaction.take().expect("should be Some before transaction ended");
-                    let mut query_result  = tr.query_iter(query).map_err(Error::from).await?;
-                    let result = query_result
-                        .map(
-                        |row| mysql_async_row_to_tuple(row)
-                        )
-                        .await?
-                        .into_iter()
-                        .collect::<Result<Vec<($( $rtype, )*)>, Error>>()?;
+                    let result = $crate::sql_common::mysql::oss_tx_guard(
+                        $crate::sql_common::mysql::OssPhase::InTransaction,
+                        $crate::sql_common::mysql::oss_tx_endpoint(&tr),
+                        async {
+                            let mut query_result = tr.query_iter(query).await?;
+                            query_result.map(mysql_async_row_to_tuple).await
+                        },
+                    )
+                    .await
+                    .map_err(Error::from)?
+                    .into_iter()
+                    .collect::<Result<Vec<($( $rtype, )*)>, Error>>()?;
 
                     // OssMysql doesn't support query telemetry
                     Ok((Transaction::OssMysql(Some(tr)), (result, None)))
@@ -736,10 +732,19 @@ macro_rules! _write_query_impl {
                     let query = mysql_query(values, $( $pname ),*);
                     let mut tr = transaction.take().expect("should be Some before transaction ended");
 
-                    let query_result = tr.query_iter(query).await?;
-
-                    let last_insert_id = query_result.last_insert_id();
-                    let rows_affected = query_result.affected_rows();
+                    let (last_insert_id, rows_affected) = $crate::sql_common::mysql::oss_tx_guard(
+                        $crate::sql_common::mysql::OssPhase::InTransaction,
+                        $crate::sql_common::mysql::oss_tx_endpoint(&tr),
+                        async {
+                            let query_result = tr.query_iter(query).await?;
+                            Ok::<_, $crate::mysql_async::Error>((
+                                query_result.last_insert_id(),
+                                query_result.affected_rows(),
+                            ))
+                        },
+                    )
+                    .await
+                    .map_err(Error::from)?;
 
                     let result = WriteResult::new(last_insert_id, rows_affected, None);
 
@@ -936,10 +941,20 @@ macro_rules! _write_query_impl {
                     let query = mysql_query($( $pname, )* $( $lname, )*);
                     let mut tr = transaction.take()
                         .expect("should be Some before transaction ended");
-                    let query_result = tr.query_iter(query).await?;
+                    let (last_insert_id, rows_affected) = $crate::sql_common::mysql::oss_tx_guard(
+                        $crate::sql_common::mysql::OssPhase::InTransaction,
+                        $crate::sql_common::mysql::oss_tx_endpoint(&tr),
+                        async {
+                            let query_result = tr.query_iter(query).await?;
+                            Ok::<_, $crate::mysql_async::Error>((
+                                query_result.last_insert_id(),
+                                query_result.affected_rows(),
+                            ))
+                        },
+                    )
+                    .await
+                    .map_err(Error::from)?;
 
-                    let last_insert_id = query_result.last_insert_id();
-                    let rows_affected = query_result.affected_rows();
                     let result = WriteResult::new(last_insert_id, rows_affected, None);
                     Ok((Transaction::OssMysql(Some(tr)), result))
                 }
