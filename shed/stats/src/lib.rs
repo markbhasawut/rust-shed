@@ -15,6 +15,8 @@
 #![deny(warnings, missing_docs, clippy::all, rustdoc::broken_intra_doc_links)]
 
 pub mod macros;
+#[cfg(not(stats_backend = "noop"))]
+pub mod memory_stats;
 #[allow(dead_code)]
 mod noop_stats;
 pub mod thread_local_aggregator;
@@ -60,13 +62,26 @@ static STATS_MANAGER_FACTORY: RwLock<Option<Box<dyn StatsManagerFactory + Send +
 /// otherwise it will panic.
 /// If it won't be called a default stats manager factory will be assumed that
 /// does nothing. (Facebook only: the default will use fb303 counters)
+/// See [`try_register_stats_manager_factory`] for a version that does not panic.
 pub fn register_stats_manager_factory(factory: impl StatsManagerFactory + Send + Sync + 'static) {
-    let mut global_factory = STATS_MANAGER_FACTORY.write().expect("poisoned lock");
     assert!(
-        global_factory.is_none(),
+        try_register_stats_manager_factory(factory),
         "Called stats::stats_manager::register_stats_manager_factory more than once"
     );
+}
+
+/// Like [`register_stats_manager_factory`], but returns `false`, dropping `factory`,
+/// instead of panicking when a factory is already registered, the default one installed
+/// by using a stat first included.
+pub fn try_register_stats_manager_factory(
+    factory: impl StatsManagerFactory + Send + Sync + 'static,
+) -> bool {
+    let mut global_factory = STATS_MANAGER_FACTORY.write().expect("poisoned lock");
+    if global_factory.is_some() {
+        return false;
+    }
     global_factory.replace(Box::new(factory));
+    true
 }
 
 #[doc(hidden)]
